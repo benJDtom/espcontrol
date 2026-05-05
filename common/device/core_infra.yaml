@@ -42,7 +42,7 @@ web_server:
   port: 80
   version: 3
   include_internal: true
-  js_url: https://cdn.jsdelivr.net/gh/benJDtom/espcontrol@claude/recursing-pike-a01563/docs/public/webserver/${device_slug}/www.js
+  js_url: https://cdn.jsdelivr.net/gh/benJDtom/espcontrol@e32550bed3b3d1ab0f322339131c69445e7c1a31/docs/public/webserver/${device_slug}/www.js
   sorting_groups:
     - id: sg_button
       name: "Button Configuration"
