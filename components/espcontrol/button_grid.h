@@ -3616,6 +3616,11 @@ inline void subscribe_light_temp_state(lv_obj_t *btn_ptr, lv_obj_t *slider,
         float k_f = 0.0f;
         if (!parse_float_ref(val, k_f)) return;
         int k = (int)(k_f + 0.5f);
+        // HA can report values outside the configured display range
+        // (the bulb's native min/max may be wider). Clamp so slider and
+        // label agree.
+        if (k < min_k) k = min_k;
+        if (k > max_k) k = max_k;
         int range = max_k - min_k;
         int pct = range > 0 ? (k - min_k) * 100 / range : 50;
         if (pct < 0) pct = 0;
