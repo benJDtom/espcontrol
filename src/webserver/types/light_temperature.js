@@ -1,7 +1,8 @@
 // Light temperature slider card: controls color_temp_kelvin on a light entity.
 // Slider bottom = min kelvin (cool), top = max kelvin (warm).
-// Config fields: unit="min-max" (kelvin range), sensor="toggle" (tap to toggle),
-// precision="color" (dynamic fill color by current temperature).
+// Config fields: unit="min-max" (kelvin range),
+// precision="color" (dynamic fill color by current temperature),
+// sensor="kelvin" (show live kelvin value as label when light is on).
 
 function lightTempParseRange(unit) {
   var parts = (unit || "2000-6500").split("-");
@@ -109,20 +110,20 @@ registerButtonType("light_temperature", {
       }
     ));
 
-    // Tap to toggle
-    var tapRow = helpers.toggleRow("Tap to toggle light", helpers.idPrefix + "tap-toggle", b.sensor === "toggle");
-    panel.appendChild(tapRow.row);
-    tapRow.input.addEventListener("change", function () {
-      b.sensor = this.checked ? "toggle" : "";
-      helpers.saveField("sensor", b.sensor);
-    });
-
     // Color fill by temperature
     var colorRow = helpers.toggleRow("Color fill by temperature", helpers.idPrefix + "kelvin-color", b.precision === "color");
     panel.appendChild(colorRow.row);
     colorRow.input.addEventListener("change", function () {
       b.precision = this.checked ? "color" : "";
       helpers.saveField("precision", b.precision);
+    });
+
+    // Show kelvin value as label when light is on
+    var kRow = helpers.toggleRow("Show kelvin value when on", helpers.idPrefix + "show-kelvin", b.sensor === "kelvin");
+    panel.appendChild(kRow.row);
+    kRow.input.addEventListener("change", function () {
+      b.sensor = this.checked ? "kelvin" : "";
+      helpers.saveField("sensor", b.sensor);
     });
   },
   renderPreview: function (b, helpers) {

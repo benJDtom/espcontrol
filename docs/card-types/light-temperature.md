@@ -18,16 +18,18 @@ A light temperature card lets you control the colour temperature of a Home Assis
 
 ## Options
 
-### Tap to toggle light
-
-When enabled, tapping the card without dragging will toggle the light on or off. When disabled, tapping has no effect — only dragging the slider sends a command.
-
 ### Color fill by temperature
 
 When enabled, the fill bar changes colour to reflect the current colour temperature rather than using your configured accent colour. The fill transitions from a warm amber at the low end to a cool blue-white at the high end, giving you a visual indication of the current setting at a glance.
 
+### Show kelvin value when on
+
+When enabled, the card's label is replaced with the live colour-temperature reading (for example, `2500K`) while the light is on. The value updates as the slider is dragged and as the light's `color_temp_kelvin` attribute changes in Home Assistant. When the light is off, the label reverts to your configured label (or the entity's friendly name).
+
 ## How It Works on the Panel
 
-- **Drag** the fill bar to set the colour temperature. Releasing the slider sends the new value to Home Assistant using `light.turn_on` with `color_temp_kelvin`.
+- **Drag** the fill bar to set the colour temperature. Releasing the slider sends the new value to Home Assistant using `light.turn_on` with `color_temp_kelvin` (which will also turn the light on if it is currently off).
+- Tapping the card without dragging does nothing — only a drag-and-release sends a command.
+- When the light is **off**, the slider renders empty regardless of the last colour temperature reported by Home Assistant.
 - When the light's colour temperature changes externally (from Home Assistant or another control), the fill bar updates automatically.
 - The slider covers only the kelvin range you configured — values outside that range are clamped.

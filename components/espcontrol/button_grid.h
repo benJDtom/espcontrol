@@ -3249,8 +3249,7 @@ inline void handle_button_click(const std::string &cfg, int slot_num,
     if (!p.entity.empty() && media_card_mode(p.sensor) == "controls")
       send_media_player_action(p.entity, "media_player.media_play_pause");
   } else if (p.type == "light_temperature") {
-    if (!p.entity.empty() && p.sensor == "toggle")
-      send_toggle_action(p.entity);
+    // Tap does nothing — only dragging the slider sends commands.
   } else if (p.type == "slider" || p.type == "cover") {
     if (!p.entity.empty()) send_slider_action(p.entity, -1, cover_tilt_mode(p.sensor));
   } else {
@@ -3283,7 +3282,10 @@ struct SliderCtx {
   int kelvin_min = 2000;
   int kelvin_max = 6500;
   bool kelvin_color = false;
-  bool tap_toggle = false;
+  bool light_on = false;
+  bool show_kelvin = false;
+  lv_obj_t *text_lbl = nullptr;
+  std::string cached_label;
 };
 
 inline void slider_fit_to_button(lv_obj_t *slider, lv_obj_t *btn, bool horizontal) {
@@ -3544,7 +3546,40 @@ inline void subscribe_slider_state(lv_obj_t *btn_ptr, lv_obj_t *icon_lbl,
 
 // ── Light temperature card helpers ───────────────────────────────────
 
-// Subscribe to color_temp_kelvin for a light temperature slider.
+// Apply the resolved label for a light_temperature card. When show_kelvin is
+// enabled and the light is on, displays "<K>K"; otherwise restores the cached
+// configured label (user-set label or last known friendly_name).
+inline void light_temp_apply_label(SliderCtx *ctx, int kelvin) {
+  if (!ctx || !ctx->text_lbl) return;
+  if (ctx->show_kelvin && ctx->light_on) {
+    char buf[16];
+    snprintf(buf, sizeof(buf), "%dK", kelvin);
+    lv_label_set_text(ctx->text_lbl, buf);
+  } else {
+    lv_label_set_text(ctx->text_lbl, ctx->cached_label.c_str());
+  }
+}
+
+// Subscribe to friendly_name and keep the SliderCtx cached_label in sync;
+// only writes to the visible label when not currently displaying kelvin.
+inline void subscribe_friendly_name_for_light_temp(lv_obj_t *text_lbl,
+                                                    SliderCtx *ctx,
+                                                    const std::string &entity_id) {
+  if (entity_id.empty() || !text_lbl) return;
+  esphome::api::global_api_server->subscribe_home_assistant_state(
+    entity_id, std::string("friendly_name"),
+    std::function<void(esphome::StringRef)>(
+      [text_lbl, ctx](esphome::StringRef name) {
+        if (ctx) ctx->cached_label = string_ref_limited(name, HA_FRIENDLY_NAME_MAX_LEN);
+        if (!ctx || !ctx->show_kelvin || !ctx->light_on) {
+          lv_label_set_text_limited(text_lbl, name, HA_FRIENDLY_NAME_MAX_LEN);
+        }
+      })
+  );
+}
+
+// Subscribe to on/off state plus color_temp_kelvin for a light temperature slider.
+// When the light is off, the slider renders empty (value 0, no fill).
 inline void subscribe_light_temp_state(lv_obj_t *btn_ptr, lv_obj_t *slider,
                                         const std::string &entity_id,
                                         int min_k, int max_k, bool kelvin_color) {
@@ -3552,10 +3587,32 @@ inline void subscribe_light_temp_state(lv_obj_t *btn_ptr, lv_obj_t *slider,
   SliderCtx *sctx = (SliderCtx *)lv_obj_get_user_data(slider);
   lv_obj_t *fill = sctx ? sctx->fill : nullptr;
   lv_coord_t rad = sctx ? sctx->radius : 0;
+  // Track on/off so the kelvin attribute callback can ignore stale values
+  // while the light is off (HA still emits the last color_temp_kelvin).
+  esphome::api::global_api_server->subscribe_home_assistant_state(
+    entity_id, {},
+    std::function<void(esphome::StringRef)>(
+      [slider, btn_ptr, fill, rad, sctx](esphome::StringRef state) {
+        bool on = is_entity_on_ref(state);
+        bool was_on = sctx ? sctx->light_on : false;
+        if (sctx) sctx->light_on = on;
+        if (!on) {
+          lv_slider_set_value(slider, 0, LV_ANIM_OFF);
+          if (fill) slider_update_fill(fill, btn_ptr, 0, false, false, rad);
+        }
+        // Refresh label on any on↔off transition so kelvin/cached_label swaps.
+        if (sctx && sctx->show_kelvin && was_on != on) {
+          int cur_k = sctx->kelvin_min + lv_slider_get_value(slider) *
+                      (sctx->kelvin_max - sctx->kelvin_min) / 100;
+          light_temp_apply_label(sctx, cur_k);
+        }
+      })
+  );
   esphome::api::global_api_server->subscribe_home_assistant_state(
     entity_id, std::string("color_temp_kelvin"),
     std::function<void(esphome::StringRef)>(
-      [slider, btn_ptr, fill, rad, min_k, max_k, kelvin_color](esphome::StringRef val) {
+      [slider, btn_ptr, fill, rad, min_k, max_k, kelvin_color, sctx](esphome::StringRef val) {
+        if (sctx && !sctx->light_on) return;  // light is off — keep slider empty
         float k_f = 0.0f;
         if (!parse_float_ref(val, k_f)) return;
         int k = (int)(k_f + 0.5f);
@@ -3567,6 +3624,7 @@ inline void subscribe_light_temp_state(lv_obj_t *btn_ptr, lv_obj_t *slider,
         slider_update_fill(fill, btn_ptr, pct, false, false, rad);
         if (kelvin_color && fill)
           lv_obj_set_style_bg_color(fill, kelvin_to_fill_color(k, min_k, max_k), LV_PART_MAIN);
+        if (sctx) light_temp_apply_label(sctx, k);
       })
   );
 }
@@ -3597,7 +3655,10 @@ inline void setup_light_temp_visual(BtnSlot &s, const ParsedCfg &p, uint32_t on_
   ctx->kelvin_min = min_k;
   ctx->kelvin_max = max_k;
   ctx->kelvin_color = kcolor;
-  ctx->tap_toggle = (p.sensor == "toggle");
+  ctx->light_on = false;
+  ctx->show_kelvin = (p.sensor == "kelvin");
+  ctx->text_lbl = s.text_lbl;
+  ctx->cached_label = p.label;  // may be empty; friendly_name sub fills it later
   lv_obj_set_user_data(slider, (void *)ctx);
   slider_bind_geometry_refresh(s.btn, slider);
 
@@ -3612,9 +3673,14 @@ inline void setup_light_temp_visual(BtnSlot &s, const ParsedCfg &p, uint32_t on_
     if (!c) return;
     int val = lv_slider_get_value(sl);
     slider_update_fill(c->fill, lv_obj_get_parent(sl), val, false, false, c->radius);
+    int k = c->kelvin_min + val * (c->kelvin_max - c->kelvin_min) / 100;
     if (c->kelvin_color && c->fill) {
-      int k = c->kelvin_min + val * (c->kelvin_max - c->kelvin_min) / 100;
       lv_obj_set_style_bg_color(c->fill, kelvin_to_fill_color(k, c->kelvin_min, c->kelvin_max), LV_PART_MAIN);
+    }
+    if (c->show_kelvin) {
+      // Treat dragging as the light coming on — update label live to "<K>K".
+      c->light_on = true;
+      light_temp_apply_label(c, k);
     }
   }, LV_EVENT_VALUE_CHANGED, nullptr);
 
@@ -4075,7 +4141,7 @@ inline lv_obj_t *setup_subpage_slider(lv_obj_t *btn, lv_obj_t *icon_lbl, lv_obj_
 inline lv_obj_t *setup_subpage_light_temp(lv_obj_t *btn, lv_obj_t *icon_lbl, lv_obj_t *text_lbl,
                                            const SubpageBtn &sb, uint32_t on_color, lv_coord_t radius) {
   if (!sb.label.empty()) lv_label_set_text(text_lbl, sb.label.c_str());
-  else subscribe_friendly_name(text_lbl, sb.entity);
+  // friendly_name subscription deferred until ctx exists, so it can update cached_label.
 
   int min_k = 2000, max_k = 6500;
   parse_kelvin_range(sb.unit, min_k, max_k);
@@ -4099,7 +4165,10 @@ inline lv_obj_t *setup_subpage_light_temp(lv_obj_t *btn, lv_obj_t *icon_lbl, lv_
   ctx->kelvin_min = min_k;
   ctx->kelvin_max = max_k;
   ctx->kelvin_color = kcolor;
-  ctx->tap_toggle = (sb.sensor == "toggle");
+  ctx->light_on = false;
+  ctx->show_kelvin = (sb.sensor == "kelvin");
+  ctx->text_lbl = text_lbl;
+  ctx->cached_label = sb.label;  // may be empty; friendly_name sub fills it later
   lv_obj_set_user_data(sl, (void *)ctx);
   slider_bind_geometry_refresh(btn, sl);
 
@@ -4114,9 +4183,13 @@ inline lv_obj_t *setup_subpage_light_temp(lv_obj_t *btn, lv_obj_t *icon_lbl, lv_
     if (!c) return;
     int val = lv_slider_get_value(s);
     slider_update_fill(c->fill, lv_obj_get_parent(s), val, false, false, c->radius);
+    int k = c->kelvin_min + val * (c->kelvin_max - c->kelvin_min) / 100;
     if (c->kelvin_color && c->fill) {
-      int k = c->kelvin_min + val * (c->kelvin_max - c->kelvin_min) / 100;
       lv_obj_set_style_bg_color(c->fill, kelvin_to_fill_color(k, c->kelvin_min, c->kelvin_max), LV_PART_MAIN);
+    }
+    if (c->show_kelvin) {
+      c->light_on = true;
+      light_temp_apply_label(c, k);
     }
   }, LV_EVENT_VALUE_CHANGED, nullptr);
 
@@ -4128,15 +4201,8 @@ inline lv_obj_t *setup_subpage_light_temp(lv_obj_t *btn, lv_obj_t *icon_lbl, lv_
   }, LV_EVENT_RELEASED, nullptr);
 
   subscribe_light_temp_state(btn, sl, sb.entity, min_k, max_k, kcolor);
-
-  if (ctx->tap_toggle) {
-    // Intentionally leaked -- lives for the lifetime of the display
-    std::string *eid = new std::string(sb.entity);
-    lv_obj_add_event_cb(btn, [](lv_event_t *e) {
-      std::string *en = (std::string *)lv_event_get_user_data(e);
-      if (en && !en->empty()) send_toggle_action(*en);
-    }, LV_EVENT_CLICKED, eid);
-  }
+  if (sb.label.empty())
+    subscribe_friendly_name_for_light_temp(text_lbl, ctx, sb.entity);
 
   return sl;
 }
@@ -4686,8 +4752,10 @@ inline void grid_phase2(
         parse_kelvin_range(p.unit, min_k, max_k);
         subscribe_light_temp_state(s.btn, slider, p.entity, min_k, max_k, p.precision == "color");
       }
-      if (p.label.empty())
-        subscribe_friendly_name(s.text_lbl, p.entity);
+      if (p.label.empty()) {
+        SliderCtx *lctx = slider ? (SliderCtx *)lv_obj_get_user_data(slider) : nullptr;
+        subscribe_friendly_name_for_light_temp(s.text_lbl, lctx, p.entity);
+      }
       continue;
     }
 
