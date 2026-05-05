@@ -3095,6 +3095,52 @@ inline void send_slider_action(const std::string &entity_id, int value, bool cov
   esphome::api::global_api_server->send_homeassistant_action(req);
 }
 
+// Parse "min-max" kelvin range from the unit config field (e.g. "2000-6500").
+inline void parse_kelvin_range(const std::string &unit, int &min_k, int &max_k) {
+  min_k = 2000; max_k = 6500;
+  if (unit.empty()) return;
+  auto dash = unit.find('-');
+  if (dash == std::string::npos || dash == 0) return;
+  int a = atoi(unit.substr(0, dash).c_str());
+  int b = atoi(unit.substr(dash + 1).c_str());
+  if (a >= 1000 && b > a) { min_k = a; max_k = b; }
+}
+
+// Map a kelvin value to an lv_color_t by lerping between warm amber (low K) and
+// cool blue-white (high K). Used when "color fill by temperature" is enabled.
+inline lv_color_t kelvin_to_fill_color(int k, int min_k, int max_k) {
+  if (max_k <= min_k) max_k = min_k + 1;
+  float t = (float)(k - min_k) / (float)(max_k - min_k);
+  if (t < 0.0f) t = 0.0f;
+  if (t > 1.0f) t = 1.0f;
+  // warm = 0xFF8012, cool = 0xB8CCFF
+  uint8_t r = (uint8_t)(0xFF + t * (float)(0xB8 - 0xFF) + 0.5f);
+  uint8_t g = (uint8_t)(0x80 + t * (float)(0xCC - 0x80) + 0.5f);
+  uint8_t b = (uint8_t)(0x12 + t * (float)(0xFF - 0x12) + 0.5f);
+  return lv_color_make(r, g, b);
+}
+
+// Send light.turn_on with color_temp_kelvin mapped from 0-100 pct over [min_k, max_k].
+inline void send_light_temp_action(const std::string &entity_id, int pct, int min_k, int max_k) {
+  if (entity_id.empty()) return;
+  esphome::api::HomeassistantActionRequest req;
+  req.is_event = false;
+  req.service = decltype(req.service)("light.turn_on");
+  req.data.init(2);
+  auto &kv1 = req.data.emplace_back();
+  kv1.key = decltype(kv1.key)("entity_id");
+  kv1.value = decltype(kv1.value)(entity_id.c_str());
+  auto &kv2 = req.data.emplace_back();
+  kv2.key = decltype(kv2.key)("color_temp_kelvin");
+  int kelvin = min_k + (pct * (max_k - min_k)) / 100;
+  if (kelvin < min_k) kelvin = min_k;
+  if (kelvin > max_k) kelvin = max_k;
+  char buf[8];
+  snprintf(buf, sizeof(buf), "%d", kelvin);
+  kv2.value = decltype(kv2.value)(buf);
+  esphome::api::global_api_server->send_homeassistant_action(req);
+}
+
 inline std::string media_card_mode(const std::string &sensor) {
   if (sensor == "volume" || sensor == "position") return sensor;
   return "controls";
@@ -3202,6 +3248,9 @@ inline void handle_button_click(const std::string &cfg, int slot_num,
   } else if (p.type == "media") {
     if (!p.entity.empty() && media_card_mode(p.sensor) == "controls")
       send_media_player_action(p.entity, "media_player.media_play_pause");
+  } else if (p.type == "light_temperature") {
+    if (!p.entity.empty() && p.sensor == "toggle")
+      send_toggle_action(p.entity);
   } else if (p.type == "slider" || p.type == "cover") {
     if (!p.entity.empty()) send_slider_action(p.entity, -1, cover_tilt_mode(p.sensor));
   } else {
@@ -3229,6 +3278,12 @@ struct SliderCtx {
   lv_obj_t *media_value_lbl = nullptr;
   lv_obj_t *media_status_lbl = nullptr;
   lv_timer_t *media_timer = nullptr;
+  // light_temperature fields
+  bool light_temp = false;
+  int kelvin_min = 2000;
+  int kelvin_max = 6500;
+  bool kelvin_color = false;
+  bool tap_toggle = false;
 };
 
 inline void slider_fit_to_button(lv_obj_t *slider, lv_obj_t *btn, bool horizontal) {
@@ -3485,6 +3540,90 @@ inline void subscribe_slider_state(lv_obj_t *btn_ptr, lv_obj_t *icon_lbl,
         })
     );
   }
+}
+
+// ── Light temperature card helpers ───────────────────────────────────
+
+// Subscribe to color_temp_kelvin for a light temperature slider.
+inline void subscribe_light_temp_state(lv_obj_t *btn_ptr, lv_obj_t *slider,
+                                        const std::string &entity_id,
+                                        int min_k, int max_k, bool kelvin_color) {
+  if (!slider || entity_id.empty()) return;
+  SliderCtx *sctx = (SliderCtx *)lv_obj_get_user_data(slider);
+  lv_obj_t *fill = sctx ? sctx->fill : nullptr;
+  lv_coord_t rad = sctx ? sctx->radius : 0;
+  esphome::api::global_api_server->subscribe_home_assistant_state(
+    entity_id, std::string("color_temp_kelvin"),
+    std::function<void(esphome::StringRef)>(
+      [slider, btn_ptr, fill, rad, min_k, max_k, kelvin_color](esphome::StringRef val) {
+        float k_f = 0.0f;
+        if (!parse_float_ref(val, k_f)) return;
+        int k = (int)(k_f + 0.5f);
+        int range = max_k - min_k;
+        int pct = range > 0 ? (k - min_k) * 100 / range : 50;
+        if (pct < 0) pct = 0;
+        if (pct > 100) pct = 100;
+        lv_slider_set_value(slider, pct, LV_ANIM_OFF);
+        slider_update_fill(fill, btn_ptr, pct, false, false, rad);
+        if (kelvin_color && fill)
+          lv_obj_set_style_bg_color(fill, kelvin_to_fill_color(k, min_k, max_k), LV_PART_MAIN);
+      })
+  );
+}
+
+// Build the visual for a light temperature slider card.
+inline void setup_light_temp_visual(BtnSlot &s, const ParsedCfg &p, uint32_t on_color) {
+  setup_toggle_visual(s, p);
+  int min_k = 2000, max_k = 6500;
+  parse_kelvin_range(p.unit, min_k, max_k);
+  bool kcolor = (p.precision == "color");
+
+  lv_obj_t *slider = setup_slider_widget(s.btn, on_color, false);
+  lv_coord_t pad = lv_obj_get_style_radius(s.btn, LV_PART_MAIN) + 4;
+  lv_obj_align(s.icon_lbl, LV_ALIGN_TOP_LEFT, pad, pad);
+  lv_obj_align(s.text_lbl, LV_ALIGN_BOTTOM_LEFT, pad, -pad);
+  lv_obj_set_user_data(s.sensor_container, (void *)slider);
+
+  lv_obj_t *fill = lv_obj_get_child(s.btn, 0);
+  // Intentionally leaked -- lives for the lifetime of the display
+  SliderCtx *ctx = new SliderCtx();
+  ctx->entity_id = p.entity;
+  ctx->fill = fill;
+  ctx->horizontal = false;
+  ctx->cover_tilt = false;
+  ctx->inverted = false;
+  ctx->radius = lv_obj_get_style_radius(s.btn, LV_PART_MAIN);
+  ctx->light_temp = true;
+  ctx->kelvin_min = min_k;
+  ctx->kelvin_max = max_k;
+  ctx->kelvin_color = kcolor;
+  ctx->tap_toggle = (p.sensor == "toggle");
+  lv_obj_set_user_data(slider, (void *)ctx);
+  slider_bind_geometry_refresh(s.btn, slider);
+
+  if (kcolor && fill) {
+    int mid_k = min_k + (max_k - min_k) / 2;
+    lv_obj_set_style_bg_color(fill, kelvin_to_fill_color(mid_k, min_k, max_k), LV_PART_MAIN);
+  }
+
+  lv_obj_add_event_cb(slider, [](lv_event_t *e) {
+    lv_obj_t *sl = static_cast<lv_obj_t *>(lv_event_get_target(e));
+    SliderCtx *c = (SliderCtx *)lv_obj_get_user_data(sl);
+    if (!c) return;
+    int val = lv_slider_get_value(sl);
+    slider_update_fill(c->fill, lv_obj_get_parent(sl), val, false, false, c->radius);
+    if (c->kelvin_color && c->fill) {
+      int k = c->kelvin_min + val * (c->kelvin_max - c->kelvin_min) / 100;
+      lv_obj_set_style_bg_color(c->fill, kelvin_to_fill_color(k, c->kelvin_min, c->kelvin_max), LV_PART_MAIN);
+    }
+  }, LV_EVENT_VALUE_CHANGED, nullptr);
+
+  lv_obj_add_event_cb(slider, [](lv_event_t *e) {
+    lv_obj_t *sl = static_cast<lv_obj_t *>(lv_event_get_target(e));
+    SliderCtx *c = (SliderCtx *)lv_obj_get_user_data(sl);
+    if (c && !c->entity_id.empty())
+      send_light_temp_action(c->entity_id, lv_slider_get_value(sl), c->kelvin_min, c->kelvin_max);
+  }, LV_EVENT_RELEASED, nullptr);
 }
 
 // ── Media player card helpers ─────────────────────────────────────────
@@ -3851,6 +3990,7 @@ inline std::string compact_subpage_type(const std::string &code) {
   if (code == "F") return "weather_forecast";
   if (code == "L") return "slider";
   if (code == "C") return "cover";
+  if (code == "N") return "light_temperature";
   if (code == "R") return "garage";
   if (code == "K") return "lock";
   if (code == "M") return "media";
@@ -3927,6 +4067,76 @@ inline lv_obj_t *setup_subpage_slider(lv_obj_t *btn, lv_obj_t *icon_lbl, lv_obj_
     std::string *en = (std::string *)lv_event_get_user_data(e);
     if (en && !en->empty()) send_slider_action(*en, -1);
   }, LV_EVENT_CLICKED, eid);
+
+  return sl;
+}
+
+// Create a light temperature slider inside a subpage screen.
+inline lv_obj_t *setup_subpage_light_temp(lv_obj_t *btn, lv_obj_t *icon_lbl, lv_obj_t *text_lbl,
+                                           const SubpageBtn &sb, uint32_t on_color, lv_coord_t radius) {
+  if (!sb.label.empty()) lv_label_set_text(text_lbl, sb.label.c_str());
+  else subscribe_friendly_name(text_lbl, sb.entity);
+
+  int min_k = 2000, max_k = 6500;
+  parse_kelvin_range(sb.unit, min_k, max_k);
+  bool kcolor = (sb.precision == "color");
+
+  lv_obj_t *sl = setup_slider_widget(btn, on_color, false);
+  lv_coord_t pad = radius + 4;
+  lv_obj_align(icon_lbl, LV_ALIGN_TOP_LEFT, pad, pad);
+  lv_obj_align(text_lbl, LV_ALIGN_BOTTOM_LEFT, pad, -pad);
+
+  lv_obj_t *fill = lv_obj_get_child(btn, 0);
+  // Intentionally leaked -- lives for the lifetime of the display
+  SliderCtx *ctx = new SliderCtx();
+  ctx->entity_id = sb.entity;
+  ctx->fill = fill;
+  ctx->horizontal = false;
+  ctx->cover_tilt = false;
+  ctx->inverted = false;
+  ctx->radius = radius;
+  ctx->light_temp = true;
+  ctx->kelvin_min = min_k;
+  ctx->kelvin_max = max_k;
+  ctx->kelvin_color = kcolor;
+  ctx->tap_toggle = (sb.sensor == "toggle");
+  lv_obj_set_user_data(sl, (void *)ctx);
+  slider_bind_geometry_refresh(btn, sl);
+
+  if (kcolor && fill) {
+    int mid_k = min_k + (max_k - min_k) / 2;
+    lv_obj_set_style_bg_color(fill, kelvin_to_fill_color(mid_k, min_k, max_k), LV_PART_MAIN);
+  }
+
+  lv_obj_add_event_cb(sl, [](lv_event_t *e) {
+    lv_obj_t *s = static_cast<lv_obj_t *>(lv_event_get_target(e));
+    SliderCtx *c = (SliderCtx *)lv_obj_get_user_data(s);
+    if (!c) return;
+    int val = lv_slider_get_value(s);
+    slider_update_fill(c->fill, lv_obj_get_parent(s), val, false, false, c->radius);
+    if (c->kelvin_color && c->fill) {
+      int k = c->kelvin_min + val * (c->kelvin_max - c->kelvin_min) / 100;
+      lv_obj_set_style_bg_color(c->fill, kelvin_to_fill_color(k, c->kelvin_min, c->kelvin_max), LV_PART_MAIN);
+    }
+  }, LV_EVENT_VALUE_CHANGED, nullptr);
+
+  lv_obj_add_event_cb(sl, [](lv_event_t *e) {
+    lv_obj_t *s = static_cast<lv_obj_t *>(lv_event_get_target(e));
+    SliderCtx *c = (SliderCtx *)lv_obj_get_user_data(s);
+    if (c && !c->entity_id.empty())
+      send_light_temp_action(c->entity_id, lv_slider_get_value(s), c->kelvin_min, c->kelvin_max);
+  }, LV_EVENT_RELEASED, nullptr);
+
+  subscribe_light_temp_state(btn, sl, sb.entity, min_k, max_k, kcolor);
+
+  if (ctx->tap_toggle) {
+    // Intentionally leaked -- lives for the lifetime of the display
+    std::string *eid = new std::string(sb.entity);
+    lv_obj_add_event_cb(btn, [](lv_event_t *e) {
+      std::string *en = (std::string *)lv_event_get_user_data(e);
+      if (en && !en->empty()) send_toggle_action(*en);
+    }, LV_EVENT_CLICKED, eid);
+  }
 
   return sl;
 }
@@ -4261,6 +4471,8 @@ inline void grid_phase1(
     }
     if (p.type == "slider" || p.type == "cover") {
       setup_slider_visual(s, p, has_on ? on_val : DEFAULT_SLIDER_COLOR);
+    } else if (p.type == "light_temperature") {
+      setup_light_temp_visual(s, p, has_on ? on_val : DEFAULT_SLIDER_COLOR);
     } else {
       setup_toggle_visual(s, p);
     }
@@ -4463,6 +4675,17 @@ inline void grid_phase2(
       subscribe_slider_state(s.btn, s.icon_lbl, slider,
         sl_has_icon_on, sl_icon_off_cp, sl_icon_on_cp, p.entity,
         p.type == "cover" && cover_tilt_mode(p.sensor));
+      if (p.label.empty())
+        subscribe_friendly_name(s.text_lbl, p.entity);
+      continue;
+    }
+    if (p.type == "light_temperature") {
+      lv_obj_t *slider = (lv_obj_t *)lv_obj_get_user_data(s.sensor_container);
+      if (slider) {
+        int min_k = 2000, max_k = 6500;
+        parse_kelvin_range(p.unit, min_k, max_k);
+        subscribe_light_temp_state(s.btn, slider, p.entity, min_k, max_k, p.precision == "color");
+      }
       if (p.label.empty())
         subscribe_friendly_name(s.text_lbl, p.entity);
       continue;
@@ -5163,6 +5386,26 @@ inline void grid_phase2(
             if (c && !c->key.empty()) send_internal_relay_action(c->key, c->push_mode);
           }, LV_EVENT_CLICKED, ctx);
         }
+
+      } else if (sb.type == "light_temperature" && !sb.entity.empty()) {
+        lv_obj_t *sl = setup_subpage_light_temp(sb_btn, sil, stl, sb, has_on ? on_val : DEFAULT_SLIDER_COLOR, sp_radius);
+
+        if (sp_indicator) {
+          lv_obj_t *parent_btn = slots[si].btn;
+          lv_obj_t *parent_icon = slots[si].icon_lbl;
+          int parent_idx = si;
+          int cwi = sp_child_alloc_idx++;
+          if (cwi >= MAX_SUBPAGE_ITEMS) {
+            ESP_LOGW("sensors", "Too many subpage state indicators; skipping %s", sb.entity.c_str());
+          } else {
+            sp_child_was_on[cwi] = false;
+            subscribe_subpage_parent_indicator(
+              sb.entity, parent_btn, parent_icon, parent_idx,
+              &sp_child_was_on[cwi], sp_has_icon_on,
+              sp_icon_off_glyph, sp_icon_on_glyph, sp_on_count);
+          }
+        }
+        (void)sl;
 
       } else if ((sb.type == "slider" || sb.type == "cover") && !sb.entity.empty()) {
         lv_obj_t *sl = setup_subpage_slider(sb_btn, sil, stl, sb, has_on ? on_val : DEFAULT_SLIDER_COLOR, sp_radius);

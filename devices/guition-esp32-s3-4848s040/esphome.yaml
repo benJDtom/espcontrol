@@ -26,5 +26,6 @@ wifi:
 packages:
   setup:
     url: https://github.com/benJDtom/espcontrol/
+    ref: claude/recursing-pike-a01563
     file: devices/guition-esp32-s3-4848s040/packages.yaml
     refresh: 1d
