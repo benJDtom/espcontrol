@@ -30,7 +30,7 @@ function lightTempClampMax(v, mn) {
 }
 
 registerButtonType("light_temperature", {
-  label: "Light Temperature",
+  label: "Light Temperature Slider",
   allowInSubpage: true,
   labelPlaceholder: "e.g. Living Room",
   onSelect: function (b) {
@@ -111,7 +111,7 @@ registerButtonType("light_temperature", {
     ));
 
     // Color fill by temperature
-    var colorRow = helpers.toggleRow("Color fill by temperature", helpers.idPrefix + "kelvin-color", b.precision === "color");
+    var colorRow = helpers.toggleRow("Use light color", helpers.idPrefix + "kelvin-color", b.precision === "color");
     panel.appendChild(colorRow.row);
     colorRow.input.addEventListener("change", function () {
       b.precision = this.checked ? "color" : "";
