@@ -3549,11 +3549,18 @@ inline void subscribe_slider_state(lv_obj_t *btn_ptr, lv_obj_t *icon_lbl,
 // Apply the resolved label for a light_temperature card. When show_kelvin is
 // enabled and the light is on, displays "<K>K"; otherwise restores the cached
 // configured label (user-set label or last known friendly_name).
+//
+// Bulbs store color temperature as integer mireds, so a 5500K command echoes
+// back from HA as ~5494K. Rounding the displayed value to 50K makes the drag
+// preview and post-release echo render identically.
 inline void light_temp_apply_label(SliderCtx *ctx, int kelvin) {
   if (!ctx || !ctx->text_lbl) return;
   if (ctx->show_kelvin && ctx->light_on) {
+    int rounded = ((kelvin + 25) / 50) * 50;
+    if (rounded < ctx->kelvin_min) rounded = ctx->kelvin_min;
+    if (rounded > ctx->kelvin_max) rounded = ctx->kelvin_max;
     char buf[16];
-    snprintf(buf, sizeof(buf), "%dK", kelvin);
+    snprintf(buf, sizeof(buf), "%dK", rounded);
     lv_label_set_text(ctx->text_lbl, buf);
   } else {
     lv_label_set_text(ctx->text_lbl, ctx->cached_label.c_str());
